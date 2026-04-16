@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>AI Lead Agent</title>
+
+<style>
+body {
+  margin: 0;
+  font-family: Arial;
+  background: #0f172a;
+  color: white;
+  display: flex;
+  justify-content: center;
+}
+
+.container {
+  width: 700px;
+  height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  padding: 15px;
+  font-size: 20px;
+  font-weight: bold;
+  background: #020617;
+  border-bottom: 1px solid #1e293b;
+}
+
+.chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+}
+
+.msg-row {
+  display: flex;
+  margin-bottom: 10px;
+}
+
+.msg-row.user {
+  justify-content: flex-end;
+}
+
+.msg {
+  max-width: 70%;
+  padding: 12px;
+  border-radius: 12px;
+  line-height: 1.4;
+}
+
+.user .msg {
+  background: #2563eb;
+}
+
+.bot .msg {
+  background: #16a34a;
+}
+
+.avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #475569;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 8px;
+  font-size: 14px;
+}
+
+.input-area {
+  padding: 10px;
+  border-top: 1px solid #1e293b;
+  background: #020617;
+}
+
+textarea {
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  resize: none;
+}
+
+button {
+  margin-top: 8px;
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: #22c55e;
+  color: white;
+  font-weight: bold;
+}
+
+.insights {
+  background: #1e293b;
+  padding: 10px;
+  font-size: 14px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="header">🤖 AI Lead Agent</div>
+
+<div class="chat" id="chat"></div>
+
+<div class="insights">
+  Intent: <span id="intent">-</span> |
+  Budget: <span id="budget">-</span> |
+  Urgency: <span id="urgency">-</span>
+</div>
+
+<div class="input-area">
+  <input id="name" placeholder="Your name" style="margin-bottom:5px; padding:8px; width:100%; border-radius:6px;">
+  <textarea id="msg" rows="2" placeholder="Type message..."></textarea>
+  <button onclick="send()">Send</button>
+</div>
+
+</div>
+
+<script>
+const sessionId = "user_" + Math.random().toString(36).substring(2);
+
+function addMessage(text, sender) {
+  const chat = document.getElementById("chat");
+
+  const row = document.createElement("div");
+  row.className = "msg-row " + sender;
+
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.innerText = sender === "user" ? "U" : "AI";
+
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  msg.innerText = text;
+
+  if (sender === "user") {
+    row.appendChild(msg);
+    row.appendChild(avatar);
+  } else {
+    row.appendChild(avatar);
+    row.appendChild(msg);
+  }
+
+  chat.appendChild(row);
+  chat.scrollTop = chat.scrollHeight;
+
+  return msg;
+}
+
+async function send() {
+  const name = document.getElementById("name").value;
+  const msgEl = document.getElementById("msg");
+  const message = msgEl.value;
+
+  if (!message.trim()) return;
+
+  addMessage(message, "user");
+  msgEl.value = "";
+
+  const typingMsg = addMessage("Typing...", "bot");
+
+  try {
+    const res = await fetch("http://localhost:3000/lead", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ name, message, sessionId })
+    });
+
+    const data = await res.json();
+    const { reply, summary } = data.data;
+
+    typingMsg.innerText = reply;
+
+    document.getElementById("intent").innerText = summary.intent;
+    document.getElementById("budget").innerText = summary.budget;
+    document.getElementById("urgency").innerText = summary.urgency;
+
+  } catch {
+    typingMsg.innerText = "Error. Try again.";
+  }
+}
+
+// Enter to send
+document.getElementById("msg").addEventListener("keypress", function(e) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+</script>
+
+</body>
+</html>
