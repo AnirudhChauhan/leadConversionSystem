@@ -1,0 +1,27 @@
+{
+  "name": "ai-lead-agent",
+  "version": "1.0.0",
+  "description": "AI Lead Qualification System with Groq, Email & Google Sheets",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "ai",
+    "lead-generation",
+    "groq",
+    "chatbot"
+  ],
+  "author": "Anirudh",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.19.2",
+    "googleapis": "^133.0.0",
+    "groq-sdk": "^0.5.0",
+    "nodemailer": "^6.9.13"
+  }
+}
