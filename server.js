@@ -2,23 +2,26 @@ import express from "express";
 import Groq from "groq-sdk";
 import cors from "cors";
 import nodemailer from "nodemailer";
-import { google } from "googleapis";
 import dotenv from "dotenv";
+
 dotenv.config();
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-// 🔑 ENV (use Render env vars in prod)
+/* ---------------- GROQ ---------------- */
+
 const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
 
-// 🧠 Memory
+/* ---------------- MEMORY ---------------- */
+
 const sessions = {};
 
-// 📧 Email
+/* ---------------- EMAIL ---------------- */
+
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -27,82 +30,105 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// 📊 Google Sheets
-// const auth = new google.auth.GoogleAuth({
-//   keyFile: "service-account.json",
-//   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-// });
+/* ---------------- HELPERS ---------------- */
 
-// const sheets = google.sheets({ version: "v4", auth });
-
-// const SPREADSHEET_ID = "YOUR_SHEET_ID";
-
-// 🔧 Helpers
-function isValid(value) {
-  if (!value) return false;
-  const v = value.toLowerCase().trim();
-  return v !== "unknown" && v !== "not specified";
+function isValid(v) {
+  if (!v) return false;
+  const val = v.toLowerCase().trim();
+  return val !== "unknown" && val !== "not specified";
 }
 
-// passing data to google sheets
-// async function saveToGoogleSheets(name, message, summary) {
-//   await sheets.spreadsheets.values.append({
-//     spreadsheetId: SPREADSHEET_ID,
-//     range: "Sheet1!A:G",
-//     valueInputOption: "USER_ENTERED",
-//     requestBody: {
-//       values: [[
-//         name,
-//         message,
-//         summary.intent,
-//         summary.budget,
-//         summary.urgency,
-//         summary.action,
-//         new Date().toLocaleString()
-//       ]]
-//     }
-//   });
-// }
-
-async function sendLeadEmail(name, message, summary, history) {
-  await transporter.sendMail({
-    from: process.env.EMAIL_USER,
-    to: process.env.EMAIL_USER,
-    subject: "🔥 New Lead Received",
-    html: `
-      <h2>New Lead</h2>
-      <p><b>Name:</b> ${name}</p>
-      <p><b>Message:</b> ${message}</p>
-
-      <h3>Insights</h3>
-      <ul>
-        <li>Intent: ${summary.intent}</li>
-        <li>Budget: ${summary.budget}</li>
-        <li>Urgency: ${summary.urgency}</li>
-        <li>Action: ${summary.action}</li>
-      </ul>
-
-      <h3>Conversation</h3>
-      <pre>${JSON.stringify(history, null, 2)}</pre>
-    `
-  });
+function isEmail(v) {
+  return /\S+@\S+\.\S+/.test(v);
 }
 
-// 🚀 API
+function isPhone(v) {
+  return /^[0-9]{10}$/.test(v);
+}
+
+function getLeadScore(budget, timeline) {
+  const highBudget = /cr|crore/i.test(budget);
+  const fastTimeline = /immediate|now|1|2|3 month/i.test(timeline);
+
+  if (highBudget && fastTimeline) return "HOT";
+  if (highBudget || fastTimeline) return "WARM";
+  return "COLD";
+}
+
+/* ---------------- HEALTH ---------------- */
+
+app.get("/", (req, res) => {
+  res.send("🚀 Property AI Running");
+});
+
+/* ---------------- API ---------------- */
+
 app.post("/lead", async (req, res) => {
-  const { name, message, sessionId } = req.body;
+  try {
+    const { message, sessionId } = req.body;
 
-  if (!sessions[sessionId]) sessions[sessionId] = [];
+    if (!message || !sessionId) {
+      return res.status(400).json({
+        success: false,
+        message: "message & sessionId required",
+      });
+    }
 
-  sessions[sessionId].push({ role: "user", content: message });
+    /* ---------- INIT SESSION ---------- */
 
-  const systemPrompt = `
-You are a smart sales assistant.
+    if (!sessions[sessionId]) {
+      sessions[sessionId] = {
+        chat: [],
+        stage: "property", // property → contact → done
+        summary: {
+          intent: "",
+          budget: "",
+          location: "",
+          timeline: "",
+        },
+        contact: {
+          name: "",
+          email: "",
+          phone: "",
+        },
+      };
+    }
+
+    const session = sessions[sessionId];
+
+    session.chat.push({ role: "user", content: message });
+
+    /* ---------- AI PROMPT ---------- */
+
+    const systemPrompt = `
+You are a smart real estate sales assistant.
+
+CURRENT USER DATA:
+${JSON.stringify(session.summary, null, 2)}
+
+CONTACT DATA:
+${JSON.stringify(session.contact, null, 2)}
+
+STAGE:
+${session.stage}
+
+GOAL:
+1. Collect:
+   - intent (investment or self-use)
+   - budget
+   - location
+   - timeline
+
+2. Then collect:
+   - name
+   - contact (phone or email)
 
 RULES:
-- Do NOT ask repeated questions
-- Ask only missing info
-- If all details collected → say thank you
+- NEVER ask for already filled data
+- If user gives multiple details → extract all
+- Ask ONLY one question at a time
+- Be short, natural, human-like
+- Do NOT repeat questions
 
 Return ONLY JSON:
 
@@ -111,67 +137,168 @@ Return ONLY JSON:
   "summary": {
     "intent": "",
     "budget": "",
-    "urgency": "",
-    "action": ""
+    "location": "",
+    "timeline": ""
+  },
+  "contact": {
+    "name": "",
+    "email": "",
+    "phone": ""
   }
 }
 `;
 
-  try {
+    /* ---------- AI CALL ---------- */
+
     const completion = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages: [
         { role: "system", content: systemPrompt },
-        ...sessions[sessionId]
+        ...session.chat.slice(-10),
       ],
     });
 
-    const text = completion.choices[0].message.content;
+    const raw = completion.choices[0].message.content;
+
+    /* ---------- SAFE PARSE ---------- */
 
     let parsed;
 
     try {
-      const match = text.match(/\{[\s\S]*\}/);
+      const match = raw.match(/\{[\s\S]*\}/);
       parsed = JSON.parse(match[0]);
+
+      if (!parsed.reply) throw new Error();
     } catch {
       parsed = {
-        reply: text,
-        summary: {
-          intent: "Unknown",
-          budget: "Unknown",
-          urgency: "Unknown",
-          action: "Manual review"
-        }
+        reply: "Got it 👍 Could you tell me your budget?",
+        summary: {},
+        contact: {},
       };
     }
 
-    sessions[sessionId].push({
+    /* ---------- SAFE MERGE ---------- */
+
+    const newSummary = parsed.summary || {};
+    const newContact = parsed.contact || {};
+
+    if (isValid(newSummary.intent)) session.summary.intent = newSummary.intent;
+    if (isValid(newSummary.budget)) session.summary.budget = newSummary.budget;
+    if (isValid(newSummary.location)) session.summary.location = newSummary.location;
+    if (isValid(newSummary.timeline)) session.summary.timeline = newSummary.timeline;
+
+    if (newContact.name && !session.contact.name) {
+      session.contact.name = newContact.name;
+    }
+
+    if (isEmail(newContact.email)) {
+      session.contact.email = newContact.email;
+    }
+
+    if (isPhone(newContact.phone)) {
+      session.contact.phone = newContact.phone;
+    }
+
+    session.chat.push({
       role: "assistant",
-      content: parsed.reply
+      content: parsed.reply,
     });
 
-    // ✅ Final stage → save + email + clear session
-    if (
-      isValid(parsed.summary.intent) &&
-      isValid(parsed.summary.budget) &&
-      isValid(parsed.summary.urgency)
-    ) {
-    //   await saveToGoogleSheets(name, message, parsed.summary);
-      await sendLeadEmail(name, message, parsed.summary, sessions[sessionId]);
+    /* ---------- GUARDRAILS (NO REPEAT) ---------- */
 
-      parsed.reply = `Thanks ${name}! 😊 Our team will contact you shortly.`;
+    const s = session.summary;
+
+    if (parsed.reply.toLowerCase().includes("budget") && isValid(s.budget)) {
+      parsed.reply = "Got it 👍 Which location are you looking at?";
+    }
+
+    if (parsed.reply.toLowerCase().includes("location") && isValid(s.location)) {
+      parsed.reply = "Nice 👍 When are you planning to buy?";
+    }
+
+    /* ---------- STAGE CONTROL ---------- */
+
+    const propertyComplete =
+      isValid(s.intent) &&
+      isValid(s.budget) &&
+      isValid(s.location) &&
+      isValid(s.timeline);
+
+    const contactComplete =
+      session.contact.name &&
+      (session.contact.email || session.contact.phone);
+
+    if (propertyComplete && session.stage === "property") {
+      session.stage = "contact";
+    }
+
+    if (contactComplete && session.stage === "contact") {
+      session.stage = "done";
+    }
+
+    /* ---------- FORCE CONTACT FLOW ---------- */
+
+    if (session.stage === "contact" && !contactComplete) {
+      if (!session.contact.name) {
+        parsed.reply = "Great 👍 May I know your name?";
+      } else if (!session.contact.email && !session.contact.phone) {
+        parsed.reply = "How should we contact you? Phone or email?";
+      }
+    }
+
+    /* ---------- FINAL ---------- */
+
+    if (session.stage === "done") {
+      const leadScore = getLeadScore(s.budget, s.timeline);
+
+      await transporter.sendMail({
+        from: process.env.EMAIL_USER,
+        to: process.env.EMAIL_USER,
+        subject: `🔥 Property Lead - ${s.budget} - ${s.location}`,
+        html: `
+          <h2>🏡 New Lead</h2>
+
+          <p><b>Name:</b> ${session.contact.name}</p>
+          <p><b>Email:</b> ${session.contact.email || "-"}</p>
+          <p><b>Phone:</b> ${session.contact.phone || "-"}</p>
+
+          <ul>
+            <li><b>Intent:</b> ${s.intent}</li>
+            <li><b>Budget:</b> ${s.budget}</li>
+            <li><b>Location:</b> ${s.location}</li>
+            <li><b>Timeline:</b> ${s.timeline}</li>
+            <li><b>Lead Score:</b> ${leadScore}</li>
+          </ul>
+        `,
+      });
+
+      parsed.reply =
+        "Thanks! 😊 Our expert will contact you shortly with best property options.";
 
       delete sessions[sessionId];
     }
 
-    res.json({ success: true, data: parsed });
+    /* ---------- RESPONSE ---------- */
+
+    res.json({
+      success: true,
+      data: parsed,
+    });
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "AI failed" });
+
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
   }
 });
 
-app.listen(3000, () => {
-  console.log("🔥 Server running on port 3000");
+/* ---------------- SERVER ---------------- */
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`🔥 Server running on port ${PORT}`);
 });
