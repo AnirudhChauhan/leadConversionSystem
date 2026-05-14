@@ -1,8 +1,8 @@
 import express from "express";
 import Groq from "groq-sdk";
 import cors from "cors";
-import nodemailer from "nodemailer";
 import dotenv from "dotenv";
+import { Resend } from "resend";
 
 dotenv.config();
 
@@ -14,9 +14,8 @@ app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.header("Access-Control-Allow-Headers", "Content-Type");
-  res.header("Access-Control-Max-Age", "86400"); // cache preflight 24h
+  res.header("Access-Control-Max-Age", "86400");
 
-  // ⚡ Instant response for preflight
   if (req.method === "OPTIONS") {
     return res.sendStatus(204);
   }
@@ -28,7 +27,7 @@ app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type"],
-  maxAge: 86400
+  maxAge: 86400,
 }));
 
 app.use(express.json());
@@ -39,25 +38,21 @@ const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
 
+/* ---------------- RESEND ---------------- */
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
 /* ---------------- MEMORY ---------------- */
 
 const sessions = {};
-
-/* ---------------- EMAIL ---------------- */
-
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
 
 /* ---------------- HELPERS ---------------- */
 
 function isValid(v) {
   if (!v) return false;
+
   const val = v.toLowerCase().trim();
+
   return val !== "unknown" && val !== "not specified";
 }
 
@@ -75,6 +70,7 @@ function getLeadScore(budget, timeline) {
 
   if (highBudget && fastTimeline) return "HOT";
   if (highBudget || fastTimeline) return "WARM";
+
   return "COLD";
 }
 
@@ -88,6 +84,7 @@ app.get("/", (req, res) => {
 
 app.post("/lead", async (req, res) => {
   try {
+
     const { message, sessionId } = req.body;
 
     if (!message || !sessionId) {
@@ -100,15 +97,18 @@ app.post("/lead", async (req, res) => {
     /* ---------- INIT SESSION ---------- */
 
     if (!sessions[sessionId]) {
+
       sessions[sessionId] = {
         chat: [],
         stage: "property",
+
         summary: {
           intent: "",
           budget: "",
           location: "",
           timeline: "",
         },
+
         contact: {
           name: "",
           email: "",
@@ -118,9 +118,13 @@ app.post("/lead", async (req, res) => {
     }
 
     const session = sessions[sessionId];
-    session.chat.push({ role: "user", content: message });
 
-    /* ---------- AI PROMPT ---------- */
+    session.chat.push({
+      role: "user",
+      content: message,
+    });
+
+    /* ---------- SYSTEM PROMPT ---------- */
 
     const systemPrompt = `
 You are a smart real estate sales assistant.
@@ -147,15 +151,26 @@ GOAL:
 
 RULES:
 - NEVER ask for already filled data
+- If user gives multiple details → extract all
 - Ask ONLY one question at a time
-- Be short and natural
+- Be short, natural, human-like
 - Do NOT repeat questions
 
 Return ONLY JSON:
+
 {
   "reply": "",
-  "summary": {},
-  "contact": {}
+  "summary": {
+    "intent": "",
+    "budget": "",
+    "location": "",
+    "timeline": ""
+  },
+  "contact": {
+    "name": "",
+    "email": "",
+    "phone": ""
+  }
 }
 `;
 
@@ -163,8 +178,13 @@ Return ONLY JSON:
 
     const completion = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
+
       messages: [
-        { role: "system", content: systemPrompt },
+        {
+          role: "system",
+          content: systemPrompt,
+        },
+
         ...session.chat.slice(-10),
       ],
     });
@@ -176,11 +196,17 @@ Return ONLY JSON:
     let parsed;
 
     try {
+
       const match = raw.match(/\{[\s\S]*\}/);
+
       parsed = JSON.parse(match[0]);
 
-      if (!parsed.reply) throw new Error();
+      if (!parsed.reply) {
+        throw new Error("Invalid AI response");
+      }
+
     } catch {
+
       parsed = {
         reply: "Got it 👍 Could you tell me your budget?",
         summary: {},
@@ -193,10 +219,21 @@ Return ONLY JSON:
     const newSummary = parsed.summary || {};
     const newContact = parsed.contact || {};
 
-    if (isValid(newSummary.intent)) session.summary.intent = newSummary.intent;
-    if (isValid(newSummary.budget)) session.summary.budget = newSummary.budget;
-    if (isValid(newSummary.location)) session.summary.location = newSummary.location;
-    if (isValid(newSummary.timeline)) session.summary.timeline = newSummary.timeline;
+    if (isValid(newSummary.intent)) {
+      session.summary.intent = newSummary.intent;
+    }
+
+    if (isValid(newSummary.budget)) {
+      session.summary.budget = newSummary.budget;
+    }
+
+    if (isValid(newSummary.location)) {
+      session.summary.location = newSummary.location;
+    }
+
+    if (isValid(newSummary.timeline)) {
+      session.summary.timeline = newSummary.timeline;
+    }
 
     if (newContact.name && !session.contact.name) {
       session.contact.name = newContact.name;
@@ -240,39 +277,68 @@ Return ONLY JSON:
     /* ---------- CONTACT FLOW ---------- */
 
     if (session.stage === "contact" && !contactComplete) {
+
       if (!session.contact.name) {
+
         parsed.reply = "Great 👍 May I know your name?";
-      } else if (!session.contact.email && !session.contact.phone) {
-        parsed.reply = "How should we contact you? Phone or email?";
+
+      } else if (
+        !session.contact.email &&
+        !session.contact.phone
+      ) {
+
+        parsed.reply =
+          "How should we contact you? Phone or email?";
       }
     }
 
     /* ---------- FINAL ---------- */
 
     if (session.stage === "done") {
-      const leadScore = getLeadScore(s.budget, s.timeline);
 
-      await transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: process.env.EMAIL_USER,
-        subject: `🔥 Property Lead - ${s.budget} - ${s.location}`,
-        html: `
-          <h2>🏡 New Lead</h2>
-          <p><b>Name:</b> ${session.contact.name}</p>
-          <p><b>Email:</b> ${session.contact.email || "-"}</p>
-          <p><b>Phone:</b> ${session.contact.phone || "-"}</p>
-          <ul>
-            <li><b>Intent:</b> ${s.intent}</li>
-            <li><b>Budget:</b> ${s.budget}</li>
-            <li><b>Location:</b> ${s.location}</li>
-            <li><b>Timeline:</b> ${s.timeline}</li>
-            <li><b>Lead Score:</b> ${leadScore}</li>
-          </ul>
-        `,
-      });
+      const leadScore = getLeadScore(
+        s.budget,
+        s.timeline
+      );
+
+      /* ---------- SEND EMAIL ---------- */
+
+      try {
+
+        await resend.emails.send({
+
+          from: "onboarding@resend.dev",
+
+          to: process.env.EMAIL_USER,
+
+          subject: `🔥 Property Lead - ${s.budget} - ${s.location}`,
+
+          html: `
+            <h2>🏡 New Lead</h2>
+
+            <p><b>Name:</b> ${session.contact.name}</p>
+            <p><b>Email:</b> ${session.contact.email || "-"}</p>
+            <p><b>Phone:</b> ${session.contact.phone || "-"}</p>
+
+            <ul>
+              <li><b>Intent:</b> ${s.intent}</li>
+              <li><b>Budget:</b> ${s.budget}</li>
+              <li><b>Location:</b> ${s.location}</li>
+              <li><b>Timeline:</b> ${s.timeline}</li>
+              <li><b>Lead Score:</b> ${leadScore}</li>
+            </ul>
+          `,
+        });
+
+        console.log("✅ EMAIL SENT");
+
+      } catch (emailErr) {
+
+        console.error("❌ EMAIL FAILED:", emailErr);
+      }
 
       parsed.reply =
-        "Thanks! 😊 Our expert will contact you shortly.";
+        "Thanks! 😊 Our expert will contact you shortly with best property options.";
 
       delete sessions[sessionId];
     }
@@ -285,11 +351,12 @@ Return ONLY JSON:
     });
 
   } catch (err) {
-    console.error(err);
+
+    console.error("❌ SERVER ERROR:", err);
 
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: err.message || "Server error",
     });
   }
 });
