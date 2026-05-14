@@ -307,7 +307,7 @@ Return ONLY JSON:
 
         await resend.emails.send({
 
-          from: "onboarding@resend.dev",
+          from: "chauhan.anirudh07@gmail.com",
 
           to: process.env.EMAIL_USER,
 
