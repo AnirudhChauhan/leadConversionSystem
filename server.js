@@ -7,8 +7,31 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
+
+/* ---------------- CORS + PREFLIGHT FIX ---------------- */
+
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.header("Access-Control-Max-Age", "86400"); // cache preflight 24h
+
+  // ⚡ Instant response for preflight
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type"],
+  maxAge: 86400
+}));
+
 app.use(express.json());
-app.use(cors());
 
 /* ---------------- GROQ ---------------- */
 
@@ -79,7 +102,7 @@ app.post("/lead", async (req, res) => {
     if (!sessions[sessionId]) {
       sessions[sessionId] = {
         chat: [],
-        stage: "property", // property → contact → done
+        stage: "property",
         summary: {
           intent: "",
           budget: "",
@@ -95,7 +118,6 @@ app.post("/lead", async (req, res) => {
     }
 
     const session = sessions[sessionId];
-
     session.chat.push({ role: "user", content: message });
 
     /* ---------- AI PROMPT ---------- */
@@ -114,37 +136,26 @@ ${session.stage}
 
 GOAL:
 1. Collect:
-   - intent (investment or self-use)
-   - budget
-   - location
-   - timeline
+- intent (investment or self-use)
+- budget
+- location
+- timeline
 
 2. Then collect:
-   - name
-   - contact (phone or email)
+- name
+- contact (phone or email)
 
 RULES:
 - NEVER ask for already filled data
-- If user gives multiple details → extract all
 - Ask ONLY one question at a time
-- Be short, natural, human-like
+- Be short and natural
 - Do NOT repeat questions
 
 Return ONLY JSON:
-
 {
   "reply": "",
-  "summary": {
-    "intent": "",
-    "budget": "",
-    "location": "",
-    "timeline": ""
-  },
-  "contact": {
-    "name": "",
-    "email": "",
-    "phone": ""
-  }
+  "summary": {},
+  "contact": {}
 }
 `;
 
@@ -204,19 +215,9 @@ Return ONLY JSON:
       content: parsed.reply,
     });
 
-    /* ---------- GUARDRAILS (NO REPEAT) ---------- */
+    /* ---------- STAGE CONTROL ---------- */
 
     const s = session.summary;
-
-    if (parsed.reply.toLowerCase().includes("budget") && isValid(s.budget)) {
-      parsed.reply = "Got it 👍 Which location are you looking at?";
-    }
-
-    if (parsed.reply.toLowerCase().includes("location") && isValid(s.location)) {
-      parsed.reply = "Nice 👍 When are you planning to buy?";
-    }
-
-    /* ---------- STAGE CONTROL ---------- */
 
     const propertyComplete =
       isValid(s.intent) &&
@@ -236,7 +237,7 @@ Return ONLY JSON:
       session.stage = "done";
     }
 
-    /* ---------- FORCE CONTACT FLOW ---------- */
+    /* ---------- CONTACT FLOW ---------- */
 
     if (session.stage === "contact" && !contactComplete) {
       if (!session.contact.name) {
@@ -257,11 +258,9 @@ Return ONLY JSON:
         subject: `🔥 Property Lead - ${s.budget} - ${s.location}`,
         html: `
           <h2>🏡 New Lead</h2>
-
           <p><b>Name:</b> ${session.contact.name}</p>
           <p><b>Email:</b> ${session.contact.email || "-"}</p>
           <p><b>Phone:</b> ${session.contact.phone || "-"}</p>
-
           <ul>
             <li><b>Intent:</b> ${s.intent}</li>
             <li><b>Budget:</b> ${s.budget}</li>
@@ -273,7 +272,7 @@ Return ONLY JSON:
       });
 
       parsed.reply =
-        "Thanks! 😊 Our expert will contact you shortly with best property options.";
+        "Thanks! 😊 Our expert will contact you shortly.";
 
       delete sessions[sessionId];
     }
